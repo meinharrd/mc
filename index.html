@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Midnight Commander (in‑browser terminal)</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #000;
+        color: #c8c8c8;
+        font-family: ui-monospace, "DejaVu Sans Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+        overflow: hidden;
+      }
+
+      #term {
+        position: fixed;
+        inset: 0;
+        padding: 6px;
+        background: #000;
+      }
+
+      .xterm,
+      .xterm-viewport,
+      .xterm-screen {
+        background: #000 !important;
+      }
+
+      /* Hide the browser scrollbar that xterm sometimes adds */
+      .xterm-viewport {
+        overflow: hidden !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="term" aria-label="Midnight Commander demo terminal"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+    <script src="./mc.js" defer></script>
+  </body>
+</html>
