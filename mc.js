@@ -182,16 +182,25 @@ const COL = {
   selExec:     sgr(22, 30, 46),
   selLink:     sgr(22, 30, 46),
 
-  // Menubar: plain black on cyan with no special highlight on hot letters.
+  // Menubar in closed state: plain black on cyan with no hot letter highlight.
   menubar:     sgr(22, 30, 46),
-  menubarHot:  sgr(22, 30, 46),    // same as menubar; hot letter only stands out in dropdowns
-  menuBg:      sgr(22, 30, 46),
-  menuHot:     sgr(22, 93, 46),    // dropdown hot letter is yellow on cyan
-  menuSel:     sgr(22, 97, 44),    // dropdown selected item: bright white on blue
+  // When ANY menu is open, the bar's text switches to bright white on cyan,
+  // hot letters are yellow on cyan, and the *opened* title is shown on a
+  // black strip (with surrounding spaces also on black).
+  menubarOpen:    sgr(22, 97, 46),
+  menubarOpenHot: sgr(22, 93, 46),
+  menuTitleSel:    sgr(22, 97, 40),
+  menuTitleSelHot: sgr(22, 93, 40),
+  // Dropdown body: non-selected items render white on cyan with yellow
+  // hot letters; selected items invert to white on black with yellow hot.
+  menuBg:      sgr(22, 97, 46),    // dropdown body (non-selected) + frame
+  menuHot:     sgr(22, 93, 46),    // hot letter on a non-selected item
+  menuSel:     sgr(22, 97, 40),    // selected item body
+  menuSelHot:  sgr(22, 93, 40),    // hot letter on a selected item
 
   fkeyNum:     sgr(22, 97, 40),    // bright white on black
   fkeyLbl:     sgr(22, 30, 46),    // black on cyan
-  shadow:      sgr(22, 30, 40),
+  shadow:      sgr(22, 90, 40),    // bright-black (dim grey) on black — see-through shadow
   dialog:      sgr(22, 30, 47),
   dialogTitle: sgr(1, 31, 47),
 
@@ -221,8 +230,11 @@ const state = {
   right: { path: '/home/meinhard',         index: 0, top: 0 },
   cols: 80, rows: 24,
   modal: null,        // { title, lines }
+  prompt: null,       // { title, message, buffer, onSubmit }
   menuOpenIdx: -1,    // index into MENU_TITLES
   menuItemIdx: 0,
+  /** Full-screen file viewer. Shape: { path, label, lines, top, wrap }. */
+  viewer: null,
   /** Click pairing for "first click selects, second click opens" */
   lastClick: '',
   /** layout cache for hit testing */
@@ -232,7 +244,8 @@ const state = {
 /* ----------------------- Filesystem helpers ------------------------- */
 
 function rowsForDir(cwd) {
-  const out = [{ raw: { n: '..', t: 'd' } }];
+  // Root has no parent, so no ".." entry there.
+  const out = cwd === '/' ? [] : [{ raw: { n: '..', t: 'd' } }];
   const bucket = FS[cwd];
   if (!bucket) {
     out.push({ ghost: true, raw: { n: '(no scripted entries here)', t: 'f' } });
@@ -466,10 +479,23 @@ const MENUS = {
   ],
 };
 
+/* Only the F-keys that actually do something get a visible label. The
+ * others render as a numbered slot with a blank label so the row layout
+ * still matches real MC. */
 const FKEYS = [
-  ['1', 'Help'], ['2', 'Menu'], ['3', 'View'],   ['4', 'Edit'],   ['5', 'Copy'],
-  ['6', 'RenMov'], ['7', 'Mkdir'], ['8', 'Delete'], ['9', 'PullDn'], ['10', 'Quit'],
+  ['1', 'Help'], ['2', ''],     ['3', 'View'], ['4', ''], ['5', ''],
+  ['6', ''],     ['7', 'Mkdir'],['8', ''],     ['9', 'PullDn'], ['10', 'Quit'],
 ];
+
+/** F-key labels shown along the bottom while the file viewer is open.
+ *  Empty labels are slots that aren't implemented yet. */
+function viewerFkeys(wrap) {
+  return [
+    ['1', 'Help'], ['2', wrap ? 'UnWrap' : 'Wrap'], ['3', 'Quit'],
+    ['4', ''], ['5', ''], ['6', ''], ['7', ''], ['8', ''], ['9', ''],
+    ['10', 'Quit'],
+  ];
+}
 
 /* ------------------------- Layout / drawing ------------------------- */
 
@@ -502,15 +528,40 @@ function buildLayout() {
 }
 
 function drawMenubar(L) {
-  // Real MC paints the whole menubar row in black-on-cyan with no
-  // hot-letter highlighting. When the user opens a menu, the open title
-  // gets a white-on-blue "selected" bar; otherwise everything is uniform.
-  let line = moveTo(L.menubarRow, 1) + COL.menubar + ' '.repeat(L.cols);
+  const menuMode = state.menuOpenIdx >= 0;
+  // In closed state: the whole bar is plain black on cyan and titles
+  // render uniformly (no hot-letter highlight). In open state: the bar
+  // becomes white on cyan, hot letters are yellow, and the opened title
+  // sits inside a black strip that includes one space of padding.
+  const barFill = menuMode ? COL.menubarOpen : COL.menubar;
+  let line = moveTo(L.menubarRow, 1) + barFill + ' '.repeat(L.cols);
+
   for (let i = 0; i < L.titles.length; i++) {
     const t = L.titles[i];
-    const open = state.menuOpenIdx === i;
-    const attr = open ? COL.menuSel : COL.menubar;
-    line += moveTo(L.menubarRow, t.x) + attr + t.label;
+    const isOpen = state.menuOpenIdx === i;
+
+    if (!menuMode) {
+      // Closed: just write the label in plain black-on-cyan.
+      line += moveTo(L.menubarRow, t.x) + COL.menubar + t.label;
+      continue;
+    }
+
+    if (isOpen) {
+      // Selected title: black background pad-1 around the label.
+      line += moveTo(L.menubarRow, t.x - 1) + COL.menuTitleSel + ' ';
+      for (let ci = 0; ci < t.label.length; ci++) {
+        const ch = t.label[ci];
+        line += (ci === t.hot ? COL.menuTitleSelHot : COL.menuTitleSel) + ch;
+      }
+      line += COL.menuTitleSel + ' ';
+    } else {
+      // Other titles in open mode: white on cyan, hot letter yellow.
+      line += moveTo(L.menubarRow, t.x);
+      for (let ci = 0; ci < t.label.length; ci++) {
+        const ch = t.label[ci];
+        line += (ci === t.hot ? COL.menubarOpenHot : COL.menubarOpen) + ch;
+      }
+    }
   }
   return line;
 }
@@ -683,15 +734,13 @@ function drawCommand(L) {
          moveTo(L.cmdRow, L.cols - marker.length + 1) + COL.cmdMarker + marker;
 }
 
-function drawFkeys(L) {
+function drawFkeys(L, keys = FKEYS) {
   let out = moveTo(L.fkeysRow, 1) + COL.fkeyLbl + ' '.repeat(L.cols);
   out += moveTo(L.fkeysRow, 1);
-  // Try to fit ten "N Label " slots into cols
   const slotW = Math.max(7, Math.floor(L.cols / 10));
   let x = 1;
   for (let i = 0; i < 10 && x + slotW <= L.cols + 1; i++) {
-    const [n, lbl] = FKEYS[i];
-    const cell = ' ' + n + ' ' + lbl;
+    const [n, lbl] = keys[i];
     out += moveTo(L.fkeysRow, x) +
            COL.fkeyNum + padLeft(n, 2) +
            COL.fkeyLbl + padRight(lbl, slotW - 2);
@@ -700,43 +749,199 @@ function drawFkeys(L) {
   return out;
 }
 
-function drawDropdown(L) {
+/** Parse the subset of ANSI we emit (cursor positioning + SGR + plain text)
+ *  into a 2D grid of the characters that would be visible. SGR codes are
+ *  ignored — we only care about the underlying glyphs. */
+function parseScreen(text, rows = TERM_ROWS, cols = TERM_COLS) {
+  const buf = Array.from({ length: rows }, () => new Array(cols).fill(' '));
+  let r = 1, c = 1;
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === '\x1b' && text[i + 1] === '[') {
+      let j = i + 2;
+      while (j < text.length) {
+        const code = text.charCodeAt(j);
+        if (code >= 0x40 && code <= 0x7E) break;
+        j++;
+      }
+      const cmd = text[j];
+      const params = text.slice(i + 2, j);
+      if (cmd === 'H') {
+        const parts = params.split(';');
+        r = parseInt(parts[0], 10) || 1;
+        c = parseInt(parts[1], 10) || 1;
+      } else if (cmd === 'J' && (params === '2' || params === '')) {
+        for (let rr = 0; rr < rows; rr++) buf[rr].fill(' ');
+        r = 1; c = 1;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (text[i] === '\n') { r++; c = 1; i++; continue; }
+    if (text[i] === '\r') { c = 1; i++; continue; }
+    if (r >= 1 && r <= rows && c >= 1 && c <= cols) {
+      buf[r - 1][c - 1] = text[i];
+    }
+    c++;
+    i++;
+  }
+  return buf;
+}
+
+/** Look up the underlying char at (row, col) 1-indexed in a parsed screen
+ *  buffer; returns a single space if out of bounds. */
+function bgChar(buf, row, col) {
+  if (row < 1 || row > buf.length) return ' ';
+  const r = buf[row - 1];
+  if (col < 1 || col > r.length) return ' ';
+  return r[col - 1];
+}
+
+function drawDropdown(L, bg) {
   if (state.menuOpenIdx < 0) return '';
   const t = L.titles[state.menuOpenIdx];
   const items = MENUS[t.key];
   const w = Math.max(...items.map(i => i.label.length)) + 4;
-  const x = Math.max(1, Math.min(t.x, L.cols - w));
+  // Anchor so the item text (which starts at +2 inside the frame) aligns
+  // with the menubar title text column. Clamp into the screen.
+  const x = Math.max(1, Math.min(t.x - 2, L.cols - w));
   const y = L.menubarRow + 1;
-  // Always start the dropdown from a clean state so previous panel
-  // attributes (notably background colors) can't leak in.
-  let out = RESET + COL.menuBg;
+  let out = RESET;
 
-  // Top border
+  // Top border (white on cyan). No shadow above it.
   out += moveTo(y, x) + COL.menuBg + BOX.tl + BOX.h.repeat(w - 2) + BOX.tr;
+
+  // ----- Item rows + right-side shadow (2 cells wide) -----
   for (let i = 0; i < items.length; i++) {
     const sel = i === state.menuItemIdx;
-    const rowAttr = sel ? COL.menuSel : COL.menuBg;
-    // Build the inner content as one attribute run, then explicitly switch
-    // back to COL.menuBg before drawing the right border so a selected row
-    // never bleeds its background past the menu's interior.
-    const content = ' ' + padRight(items[i].label, w - 4) + ' ';
+    const bodyAttr = sel ? COL.menuSel : COL.menuBg;
+    const hotAttr  = sel ? COL.menuSelHot : COL.menuHot;
+    const label = items[i].label;
+    const hotIdx = items[i].hot ?? -1;
+    const padW = w - 4 - label.length;
+
     out += moveTo(y + 1 + i, x) +
            COL.menuBg + BOX.v +
-           rowAttr + content +
+           bodyAttr + ' ';
+    for (let ci = 0; ci < label.length; ci++) {
+      const ch = label[ci];
+      out += (ci === hotIdx ? hotAttr : bodyAttr) + ch;
+    }
+    out += bodyAttr + ' '.repeat(Math.max(0, padW)) +
+           bodyAttr + ' ' +
            COL.menuBg + BOX.v +
-           COL.shadow + ' ';
+           COL.shadow +
+           bgChar(bg, y + 1 + i, x + w) +
+           bgChar(bg, y + 1 + i, x + w + 1);
   }
-  out += moveTo(y + 1 + items.length, x) +
+
+  // ----- Bottom border + 2-cell right-side shadow -----
+  const bottomRow = y + 1 + items.length;
+  out += moveTo(bottomRow, x) +
          COL.menuBg + BOX.bl + BOX.h.repeat(w - 2) + BOX.br +
-         COL.shadow + ' ';
-  // bottom shadow
-  out += moveTo(y + 2 + items.length, x + 1) + COL.shadow + ' '.repeat(w);
+         COL.shadow +
+         bgChar(bg, bottomRow, x + w) +
+         bgChar(bg, bottomRow, x + w + 1);
+
+  // ----- Bottom shadow row: offset +1 to the right, spans w+1 cells -----
+  const shadowRow = bottomRow + 1;
+  let bottomShadow = COL.shadow;
+  for (let k = 0; k < w + 1; k++) {
+    bottomShadow += bgChar(bg, shadowRow, x + 1 + k);
+  }
+  out += moveTo(shadowRow, x + 1) + bottomShadow;
   // Reset before leaving so subsequent draws aren't affected by shadow attr.
   out += RESET;
   // remember layout for hit testing
   state.layout.menu = { x, y, w, items: items.length };
   return out;
 }
+
+/* --------------------------- File viewer ---------------------------- */
+
+/** Expand a single source line into one or more screen lines.
+ *  - Tabs become 8-space stops.
+ *  - When wrap is true, lines wider than `width` are broken at width.
+ *  - When wrap is false, lines are truncated (with a trailing "$" marker). */
+function wrapViewerLines(src, width, wrap) {
+  const out = [];
+  for (const raw of src) {
+    const expanded = raw.replace(/\t/g, (_, i) => ' '.repeat(8 - (i % 8)));
+    if (!wrap) {
+      out.push(expanded.length > width ? expanded.slice(0, width - 1) + '$' : expanded);
+      continue;
+    }
+    if (expanded.length === 0) { out.push(''); continue; }
+    for (let off = 0; off < expanded.length; off += width) {
+      out.push(expanded.slice(off, off + width));
+    }
+  }
+  return out;
+}
+
+function drawViewer(L) {
+  const v = state.viewer;
+  if (!v) return '';
+
+  const titleRow = 1;
+  const bodyTop  = 2;
+  const bodyBot  = L.rows - 1;
+  const bodyH    = bodyBot - bodyTop + 1;
+  const bodyW    = L.cols;
+
+  const lines = wrapViewerLines(v.lines, bodyW, !!v.wrap);
+  const maxTop = Math.max(0, lines.length - bodyH);
+  if (v.top > maxTop) v.top = maxTop;
+  if (v.top < 0) v.top = 0;
+
+  let out = RESET + COL.base + clearScreen;
+
+  // ---- Title bar: real MC uses black on cyan -------------------------
+  // Format: "<path>   <cur>/<total>                 <percent>%"
+  const totalLines = lines.length;
+  const lastVisible = Math.min(totalLines, v.top + bodyH);
+  const pos = totalLines === 0 ? '0/0' : `${lastVisible}/${totalLines}`;
+  const percent = totalLines === 0 ? '0%'
+                : (lastVisible >= totalLines ? '100%'
+                : Math.floor((lastVisible / totalLines) * 100) + '%');
+  const POS_PERCENT_GAP = 17;
+  const rightChunk = pos + ' '.repeat(POS_PERCENT_GAP) + percent;
+  // Real MC shows the full absolute path here (no ~ substitution).
+  const pathLabel = v.path;
+  const maxPathLen = Math.max(0, bodyW - rightChunk.length - 1);
+  const shownPath = pathLabel.length > maxPathLen
+    ? '…' + pathLabel.slice(pathLabel.length - maxPathLen + 1)
+    : pathLabel;
+  const leftGap = Math.max(0, bodyW - shownPath.length - rightChunk.length);
+  const titleLine = shownPath + ' '.repeat(leftGap) + rightChunk;
+  out += moveTo(titleRow, 1) + COL.menubar + padRight(titleLine, bodyW);
+
+  // ---- Body lines: real MC uses light grey on blue, even empty rows --
+  const bodyAttr = sgr(22, 37, 44);
+  for (let i = 0; i < bodyH; i++) {
+    const lineIdx = v.top + i;
+    const text = lineIdx < lines.length ? lines[lineIdx] : '';
+    out += moveTo(bodyTop + i, 1) + bodyAttr + padRight(text, bodyW);
+  }
+
+  // ---- F-keys footer (same colours as panel-mode F-keys) -------------
+  out += drawFkeys({ ...L, fkeysRow: L.rows }, viewerFkeys(v.wrap));
+
+  out += RESET;
+  return out;
+}
+
+function openViewer(absPath, label) {
+  const body = FILE_CONTENTS[absPath] ?? `[Preview not scripted for "${label}".]`;
+  state.viewer = {
+    path: absPath,
+    label,
+    lines: body.split('\n'),
+    top: 0,
+    wrap: true,
+  };
+}
+function closeViewer() { state.viewer = null; }
 
 function drawModal(L) {
   const m = state.modal;
@@ -765,22 +970,68 @@ function drawModal(L) {
   return out;
 }
 
+function drawPrompt(L) {
+  const p = state.prompt;
+  if (!p) return '';
+  const innerW = Math.min(L.cols - 6, Math.max(40, p.message.length + 4));
+  const w = innerW + 4;
+  const h = 6;
+  const x = Math.floor((L.cols - w) / 2) + 1;
+  const y = Math.floor((L.rows - h) / 2) + 1;
+  let out = RESET;
+  // Top border with centered title
+  out += moveTo(y, x) + COL.dialog + BOX.tl + BOX.h.repeat(w - 2) + BOX.tr;
+  const title = ' ' + p.title + ' ';
+  const tx = x + Math.floor((w - title.length) / 2);
+  out += moveTo(y, tx) + COL.dialogTitle + title + COL.dialog;
+  // Body rows
+  // row 1: message
+  out += moveTo(y + 1, x) + COL.dialog + BOX.v +
+         ' ' + padRight(p.message, w - 4) + ' ' + BOX.v;
+  // row 2: input field (white on dark blue, with caret)
+  const fieldW = w - 4;
+  const fieldText = p.buffer.slice(-fieldW);
+  const fieldAttr = sgr(22, 30, 46);
+  out += moveTo(y + 2, x) + COL.dialog + BOX.v +
+         ' ' + fieldAttr + padRight(fieldText, fieldW) + COL.dialog + ' ' + BOX.v;
+  // row 3: spacer
+  out += moveTo(y + 3, x) + COL.dialog + BOX.v + ' '.repeat(w - 2) + BOX.v;
+  // row 4: OK / Cancel hint
+  const hint = ' [ OK ]   [ Cancel ] ';
+  out += moveTo(y + 4, x) + COL.dialog + BOX.v + ' '.repeat(w - 2) + BOX.v;
+  out += moveTo(y + 4, x + Math.floor((w - hint.length) / 2)) + sgr(1, 30, 46) + hint + COL.dialog;
+  // Bottom border
+  out += moveTo(y + 5, x) + COL.dialog + BOX.bl + BOX.h.repeat(w - 2) + BOX.br;
+  out += RESET;
+  // Save layout for hit tests
+  state.layout.prompt = { x, y, w, h, fieldY: y + 2 };
+  return out;
+}
+
 function render() {
   state.cols = term.cols;
   state.rows = term.rows;
   const L = buildLayout();
-  state.layout = { L, menu: null, modal: null };
+  state.layout = { L, menu: null, modal: null, prompt: null };
 
-  let out = COL.base + clearScreen;
-  out += drawMenubar(L);
-  out += drawPanel('left', L.leftPanel);
-  out += drawPanel('right', L.rightPanel);
-  out += drawHint(L);
-  out += drawCommand(L);
-  out += drawFkeys(L);
-  out += drawDropdown(L);
-  out += drawModal(L);
-  out += RESET;
+  // The viewer takes over the entire screen when active.
+  if (state.viewer) {
+    term.write(drawViewer(L));
+    return;
+  }
+
+  // ---- Pass 1: render the "base" (no dropdown) and capture chars ----
+  const base = COL.base + clearScreen +
+               drawMenubar(L) +
+               drawPanel('left', L.leftPanel) +
+               drawPanel('right', L.rightPanel) +
+               drawHint(L) +
+               drawCommand(L) +
+               drawFkeys(L);
+  const bg = parseScreen(base);
+
+  // ---- Pass 2: dropdown + modal + prompt -----------------------------
+  const out = base + drawDropdown(L, bg) + drawModal(L) + drawPrompt(L) + RESET;
   term.write(out);
 }
 
@@ -792,19 +1043,50 @@ function currentRow() {
   return rows[Math.max(0, Math.min(pan.index, rows.length - 1))];
 }
 
+/** Remember the current cursor position for the panel's current path. */
+function rememberPos(pan) {
+  pan.memory ||= Object.create(null);
+  pan.memory[pan.path] = { index: pan.index, top: pan.top };
+}
+
+/** Restore the cursor for `nextPath`. If we have a remembered position for
+ *  that path, use it. Otherwise, when ascending via "..", select the child
+ *  folder we just came from. Falls back to the first row. */
+function restorePos(pan, nextPath, childName) {
+  pan.memory ||= Object.create(null);
+  const mem = pan.memory[nextPath];
+  if (mem) {
+    pan.index = mem.index;
+    pan.top = mem.top;
+    return;
+  }
+  if (childName) {
+    const rows = rowsForDir(nextPath);
+    const idx = rows.findIndex(r => !r.ghost && r.raw.n === childName);
+    if (idx >= 0) { pan.index = idx; pan.top = 0; return; }
+  }
+  pan.index = 0; pan.top = 0;
+}
+
 function activate(side) {
   const pan = state[side];
   const rows = rowsForDir(pan.path);
   const row = rows[pan.index];
   if (!row || row.ghost) return;
   if (row.raw.n === '..') {
+    rememberPos(pan);
+    const childName = pan.path.split('/').pop() || '';
     pan.path = parentPath(pan.path);
-    pan.index = 0; pan.top = 0;
+    restorePos(pan, pan.path, childName);
     return;
   }
   if (row.raw.t === 'd') {
     const target = joinPath(pan.path, row.raw.n);
-    if (FS[target] !== undefined) { pan.path = target; pan.index = 0; pan.top = 0; }
+    if (FS[target] !== undefined) {
+      rememberPos(pan);
+      pan.path = target;
+      restorePos(pan, target);
+    }
     return;
   }
   if (row.raw.t === 'l') {
@@ -818,14 +1100,55 @@ function activate(side) {
 }
 
 function viewFile(abs, label) {
-  const body = FILE_CONTENTS[abs] ?? `[Preview not scripted for "${label}".]`;
-  showModal(label, body.split('\n'));
+  openViewer(abs, label);
 }
 
 function showModal(title, lines) {
   state.modal = { title, lines };
 }
 function closeModal() { state.modal = null; }
+
+function showPrompt(title, message, onSubmit, initial = '') {
+  state.prompt = { title, message, buffer: initial, onSubmit };
+}
+function closePrompt() { state.prompt = null; }
+
+/** Add a freshly-created child directory to the in-memory FS at `parent`
+ *  and seed its own entry list so it can be navigated into. */
+function addDirectory(parent, name) {
+  const newPath = joinPath(parent, name);
+  // No-op if it already exists.
+  if ((FS[parent] || []).some(r => r.n === name)) return false;
+  const today = new Date();
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const hh = String(today.getHours()).padStart(2, '0');
+  const mm = String(today.getMinutes()).padStart(2, '0');
+  const date = `${months[today.getMonth()]} ${String(today.getDate()).padStart(2, ' ')} ${hh}:${mm}`;
+  FS[parent] = FS[parent] || [];
+  FS[parent].push({ n: name, t: 'd', size: 4096, date });
+  FS[newPath] = [];
+  return true;
+}
+
+function mkdirInActivePanel() {
+  const pan = state[state.active];
+  showPrompt('Create a new directory', 'Enter directory name:', (name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    if (trimmed === '.' || trimmed === '..' || trimmed.includes('/')) {
+      showModal('Create a new directory', [`Invalid name: "${trimmed}"`]);
+      return;
+    }
+    if (!addDirectory(pan.path, trimmed)) {
+      showModal('Create a new directory', [`"${trimmed}" already exists.`]);
+      return;
+    }
+    // Focus the freshly created directory.
+    const rows = rowsForDir(pan.path);
+    const idx = rows.findIndex(r => !r.ghost && r.raw.n === trimmed);
+    if (idx >= 0) pan.index = idx;
+  });
+}
 
 function placeholder(msg) { showModal('Menu action', [msg]); }
 
@@ -840,10 +1163,9 @@ function handleF(n) {
     '  ↑/↓ Home End PgUp PgDn   move',
     '  Tab / ←/→                switch panel',
     '  Enter                    open',
-    '  F1..F10                  function keys',
+    '  F1, F3, F9, F10          function keys',
     '  Esc                      close menu/dialog',
   ]);
-  if (n === 2)  return showModal('User menu', ['Static mimic — scripted entries only.']);
   if (n === 3) {
     const r = currentRow();
     if (!r || r.ghost || r.raw.n === '..' || r.raw.t === 'd')
@@ -851,9 +1173,10 @@ function handleF(n) {
     if (r.raw.t === 'l') return activate(state.active);
     return viewFile(joinPath(state[state.active].path, r.raw.n), r.raw.n);
   }
-  if (n === 4)  return showModal('Edit', ['No embedded editor in this static demo.']);
-  if (n >= 5 && n <= 9) return showModal(`F${n}`, ['File operation placeholder.']);
+  if (n === 7)  return mkdirInActivePanel();
+  if (n === 9)  return openMenu(0);
   if (n === 10) return showModal('Quit', ['This is just a webpage — close the tab to exit.']);
+  // F2, F4..F6, F8: unimplemented — labels are hidden in FKEYS, so just no-op.
 }
 
 /* ----------------------- Pulldown navigation ------------------------ */
@@ -904,7 +1227,75 @@ term.attachCustomKeyEventHandler((e) => {
   return true;
 });
 
+function viewerPageStep() {
+  // body height = total rows - 2 (title row + fkeys row)
+  return Math.max(1, term.rows - 2);
+}
+
 term.onData((data) => {
+  // ---- Prompt dialog: takes input until Enter/Esc ----------------
+  if (state.prompt) {
+    const p = state.prompt;
+    if (data === '\x1b') { closePrompt(); render(); return; }
+    if (data === '\r' || data === '\n') {
+      const submit = p.onSubmit;
+      const value = p.buffer;
+      closePrompt();
+      if (typeof submit === 'function') submit(value);
+      render();
+      return;
+    }
+    // Backspace (DEL 0x7F on most terminals, BS 0x08 on some)
+    if (data === '\x7f' || data === '\b') {
+      p.buffer = p.buffer.slice(0, -1);
+      render(); return;
+    }
+    // Any printable single char (allow Unicode beyond ASCII too).
+    if (data.length === 1 && data.charCodeAt(0) >= 0x20) {
+      p.buffer += data;
+      render(); return;
+    }
+    // Otherwise ignore (arrow keys, F-keys, etc.)
+    return;
+  }
+
+  // ---- File viewer mode -------------------------------------------
+  if (state.viewer) {
+    const v = state.viewer;
+    // F-keys recognised by the viewer
+    const fnum = parseFKey(data);
+    if (fnum === 1) {
+      showModal('Viewer help', [
+        'Keyboard:',
+        '  ↑/↓ PgUp PgDn Home End  scroll',
+        '  F2                       toggle line wrap',
+        '  F3 / F10 / Esc           quit viewer',
+      ]);
+      render(); return;
+    }
+    if (fnum === 2) { v.wrap = !v.wrap; v.top = 0; render(); return; }
+    if (fnum === 3 || fnum === 10) { closeViewer(); render(); return; }
+
+    switch (data) {
+      case '\x1b':
+        closeViewer(); render(); return;
+      case '\x1b[A': case '\x1bOA':
+        v.top -= 1; render(); return;
+      case '\x1b[B': case '\x1bOB':
+        v.top += 1; render(); return;
+      case '\x1b[5~':
+        v.top -= viewerPageStep(); render(); return;
+      case '\x1b[6~':
+      case ' ':
+        v.top += viewerPageStep(); render(); return;
+      case '\x1b[H': case '\x1b[1~':
+        v.top = 0; render(); return;
+      case '\x1b[F': case '\x1b[4~':
+        v.top = Number.MAX_SAFE_INTEGER; render(); return; // clamped in drawViewer
+    }
+    return;
+  }
+
   // Modal: any key closes it
   if (state.modal) {
     if (data === '\r' || data === '\n' || data === ' ' || data === '\x1b') {
@@ -1012,6 +1403,19 @@ term.onData((data) => {
 function handleClick(x, y) {
   const L = state.layout?.L;
   if (!L) return;
+
+  // Viewer takes over the screen — only the bottom F-keys row is clickable.
+  if (state.viewer) {
+    if (y === L.rows) {
+      const slotW = Math.max(7, Math.floor(L.cols / 10));
+      const idx = Math.floor((x - 1) / slotW);
+      const n = idx + 1;
+      if (n === 1) { showModal('Viewer help', ['F2 wrap | F3/F10/Esc quit | arrows scroll']); render(); return; }
+      if (n === 2) { state.viewer.wrap = !state.viewer.wrap; state.viewer.top = 0; render(); return; }
+      if (n === 3 || n === 10) { closeViewer(); render(); return; }
+    }
+    return;
+  }
 
   // Modal first
   if (state.modal) {
