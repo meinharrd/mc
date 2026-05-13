@@ -198,8 +198,8 @@ const COL = {
   // Hint and command strip use the same dark-grey as the page background,
   // so the terminal "floats" without a visible seam. F-keys row stays
   // pure black via SGR 40.
-  hint:        sgr(22, 97, 48, 2, 0x1c, 0x1c, 0x1c),
-  command:     sgr(22, 97, 48, 2, 0x1c, 0x1c, 0x1c),
+  hint:        sgr(22, 97, 48, 2, 0x14, 0x14, 0x14),
+  command:     sgr(22, 97, 48, 2, 0x14, 0x14, 0x14),
   cmdMarker:   sgr(22, 37, 44),    // light grey on blue
   diskInfo:    sgr(22, 37, 44),    // light grey on blue (inherits frame style)
 };
