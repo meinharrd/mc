@@ -892,9 +892,16 @@ function focusPane(side) {
   state.lastClick = '';
 }
 
+// xterm.js calls this BEFORE forwarding the key to its parser. Returning
+// `false` blocks the key entirely (so onData never sees it). We want all
+// keys to be translated to escape sequences and reach onData below, so we
+// only intercept browser-level shortcuts we don't want to break.
 term.attachCustomKeyEventHandler((e) => {
-  // Let xterm’s default selection (with mouse) work, but never echo keys
-  return false;
+  if (e.type !== 'keydown') return true;
+  // Never let the terminal hijack Cmd-R / Ctrl-R (page reload) or
+  // Cmd-Shift-R / Ctrl-Shift-R (hard reload).
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'r' || e.key === 'R')) return false;
+  return true;
 });
 
 term.onData((data) => {
